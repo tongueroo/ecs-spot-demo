@@ -1,0 +1,347 @@
+# This file was generated with lono. Do not edit directly, the changes will be lost.
+# More info: http://lono.cloud
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: Example with ECS on Spot Fleets from BoltOps.
+Metadata:
+  Authors:
+    Description: Tung Nguyen (tung@boltops.com)
+  License: MIT
+Parameters:
+  KeyName:
+    Type: String
+    Description: KeyName
+    Default: ''
+  EcsCluster:
+    Type: String
+    Description: ECS Cluster
+    Default: development
+  TargetCapacity:
+    Type: String
+    Description: TargetCapacity
+    Default: '8'
+  TagName:
+    Type: String
+    Description: TagName
+    Default: "ECS Spot Fleet Demo"
+  VpcName:
+    Description: VPC name.
+    Type: String
+    ConstraintDescription: Must be a string.
+    Default: "demo vpc"
+  SourceCidr:
+    Default: 0.0.0.0/0
+    Description: CIDR/IP range for instance ssh access - defaults to 0.0.0.0/0
+    Type: String
+Conditions:
+  HasKeyName: !Not [!Equals [ !Ref KeyName, '' ]]
+Mappings:
+  AmiMap:
+    ap-northeast-1:
+      Ami: ami-084cb340923dc7101
+    ap-northeast-2:
+      Ami: ami-0e0d82e1272b5ae8a
+    ap-south-1:
+      Ami: ami-0d7805fed18723d71
+    ap-southeast-1:
+      Ami: ami-0eb4239fe0f64fe58
+    ap-southeast-2:
+      Ami: ami-051b682e0d63cc816
+    ca-central-1:
+      Ami: ami-0d9198a587e83919b
+    eu-central-1:
+      Ami: ami-042ae7188819e7e9b
+    eu-north-1:
+      Ami: ami-0a92075786c5779b9
+    eu-west-1:
+      Ami: ami-00921cd1ce43d567a
+    eu-west-2:
+      Ami: ami-0e1065cc4f7231034
+    eu-west-3:
+      Ami: ami-020cc3695affa4b6b
+    sa-east-1:
+      Ami: ami-0c4cd93b06ee26c34
+    us-east-1:
+      Ami: ami-0a6a36557ea3b9859
+    us-east-2:
+      Ami: ami-0cca5d0eeadc8c3c4
+    us-west-1:
+      Ami: ami-066a6b3ae13abc046
+    us-west-2:
+      Ami: ami-0d2f82a622136a696
+Resources:
+  SpotFleet:
+    Type: AWS::EC2::SpotFleet
+    Properties:
+      SpotFleetRequestConfigData:
+        IamFleetRole: !GetAtt IamFleetRole.Arn
+        TargetCapacity: !Ref TargetCapacity
+        LaunchSpecifications:
+  
+        - EbsOptimized: 'false'
+          InstanceType: t3.small
+          WeightedCapacity: 2
+          ImageId: !FindInMap
+            - AmiMap
+            - !Ref 'AWS::Region'
+            - Ami
+          KeyName: !If [HasKeyName, !Ref KeyName, !Ref "AWS::NoValue"]
+          SecurityGroups:
+          - GroupId: !Ref SecurityGroup
+          Monitoring:
+            Enabled: true
+          UserData:
+            Fn::Base64: !Sub |
+              #!/bin/bash
+              
+              set -eux
+              mkdir -p /etc/ecs
+              echo ECS_CLUSTER=${EcsCluster} >> /etc/ecs/ecs.config
+              export PATH=/usr/local/bin:$PATH
+              yum -y install jq
+              easy_install pip
+              pip install awscli
+              aws configure set default.region ${AWS::Region}
+              
+              cat <<EOF > /etc/init/spot-instance-termination-handler.conf
+              description "Start spot instance termination handler monitoring script"
+              author "BoltOps"
+              start on started ecs
+              script
+              echo \$\$ > /var/run/spot-instance-termination-handler.pid
+              exec /usr/local/bin/spot-instance-termination-handler.sh
+              end script
+              pre-start script
+              logger "[spot-instance-termination-handler.sh]: spot instance termination
+              notice handler started"
+              end script
+              EOF
+              
+              cat <<EOF > /usr/local/bin/spot-instance-termination-handler.sh
+              #!/bin/bash
+              while sleep 5; do
+              if [ -z \$(curl -Isf http://169.254.169.254/latest/meta-data/spot/termination-time)]; then
+              /bin/false
+              else
+              logger "[spot-instance-termination-handler.sh]: spot instance termination notice detected"
+              STATUS=DRAINING
+              ECS_CLUSTER=\$(curl -s http://localhost:51678/v1/metadata | jq .Cluster | tr -d \")
+              CONTAINER_INSTANCE=\$(curl -s http://localhost:51678/v1/metadata | jq .ContainerInstanceArn | tr -d \")
+              logger "[spot-instance-termination-handler.sh]: putting instance in state \$STATUS"
+              
+              /usr/local/bin/aws  ecs update-container-instances-state --cluster \$ECS_CLUSTER --container-instances \$CONTAINER_INSTANCE --status \$STATUS
+              
+              logger "[spot-instance-termination-handler.sh]: putting myself to sleep..."
+              sleep 120 # exit loop as instance expires in 120 secs after terminating notification
+              fi
+              done
+              EOF
+              
+              chmod +x /usr/local/bin/spot-instance-termination-handler.sh
+
+          IamInstanceProfile:
+            Arn: !GetAtt IamInstanceProfile.Arn
+          SubnetId: !Join [',', [!Ref PublicSubnet1, !Ref PublicSubnet2]]
+          TagSpecifications:
+          - ResourceType: "instance"
+            Tags:
+            - Key: Name
+              Value: !Ref TagName
+
+        - EbsOptimized: 'false'
+          InstanceType: t3.medium
+          WeightedCapacity: 4
+          ImageId: !FindInMap
+            - AmiMap
+            - !Ref 'AWS::Region'
+            - Ami
+          KeyName: !If [HasKeyName, !Ref KeyName, !Ref "AWS::NoValue"]
+          SecurityGroups:
+          - GroupId: !Ref SecurityGroup
+          Monitoring:
+            Enabled: true
+          UserData:
+            Fn::Base64: !Sub |
+              #!/bin/bash
+              
+              set -eux
+              mkdir -p /etc/ecs
+              echo ECS_CLUSTER=${EcsCluster} >> /etc/ecs/ecs.config
+              export PATH=/usr/local/bin:$PATH
+              yum -y install jq
+              easy_install pip
+              pip install awscli
+              aws configure set default.region ${AWS::Region}
+              
+              cat <<EOF > /etc/init/spot-instance-termination-handler.conf
+              description "Start spot instance termination handler monitoring script"
+              author "BoltOps"
+              start on started ecs
+              script
+              echo \$\$ > /var/run/spot-instance-termination-handler.pid
+              exec /usr/local/bin/spot-instance-termination-handler.sh
+              end script
+              pre-start script
+              logger "[spot-instance-termination-handler.sh]: spot instance termination
+              notice handler started"
+              end script
+              EOF
+              
+              cat <<EOF > /usr/local/bin/spot-instance-termination-handler.sh
+              #!/bin/bash
+              while sleep 5; do
+              if [ -z \$(curl -Isf http://169.254.169.254/latest/meta-data/spot/termination-time)]; then
+              /bin/false
+              else
+              logger "[spot-instance-termination-handler.sh]: spot instance termination notice detected"
+              STATUS=DRAINING
+              ECS_CLUSTER=\$(curl -s http://localhost:51678/v1/metadata | jq .Cluster | tr -d \")
+              CONTAINER_INSTANCE=\$(curl -s http://localhost:51678/v1/metadata | jq .ContainerInstanceArn | tr -d \")
+              logger "[spot-instance-termination-handler.sh]: putting instance in state \$STATUS"
+              
+              /usr/local/bin/aws  ecs update-container-instances-state --cluster \$ECS_CLUSTER --container-instances \$CONTAINER_INSTANCE --status \$STATUS
+              
+              logger "[spot-instance-termination-handler.sh]: putting myself to sleep..."
+              sleep 120 # exit loop as instance expires in 120 secs after terminating notification
+              fi
+              done
+              EOF
+              
+              chmod +x /usr/local/bin/spot-instance-termination-handler.sh
+
+          IamInstanceProfile:
+            Arn: !GetAtt IamInstanceProfile.Arn
+          SubnetId: !Join [',', [!Ref PublicSubnet1, !Ref PublicSubnet2]]
+          TagSpecifications:
+          - ResourceType: "instance"
+            Tags:
+            - Key: Name
+              Value: !Ref TagName
+
+## VPC
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.30.0.0/16
+      EnableDnsSupport: 'True'
+      EnableDnsHostnames: 'True'
+      Tags:
+      - Key: Name
+        Value: !Ref VpcName
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+      - Key: Name
+        Value: !Ref VpcName
+  GatewayToInternet:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+  RouteTablePublic:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+      - Key: Name
+        Value: RouteTablePublic
+  PublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Ref: RouteTablePublic
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId:
+        Ref: InternetGateway
+  SecurityGroup:
+    Properties:
+      GroupDescription: Spot fleet instance Security Group
+      SecurityGroupIngress:
+      - CidrIp: !Ref SourceCidr
+        FromPort: 22
+        IpProtocol: tcp
+        ToPort: 22
+      VpcId: !Ref Vpc
+    Type: AWS::EC2::SecurityGroup
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.30.0.0/19
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      MapPublicIpOnLaunch: true
+      Tags:
+      - Key: vpc_name
+        Value: !Ref VpcName
+      - Key: Name
+        Value: PublicSubnet1
+  RouteTableAssociationPublicSubnet1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref RouteTablePublic
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.30.32.0/19
+      AvailabilityZone: !Select [ 1, !GetAZs '' ]
+      MapPublicIpOnLaunch: true
+      Tags:
+      - Key: vpc_name
+        Value: !Ref VpcName
+      - Key: Name
+        Value: PublicSubnet2
+  RouteTableAssociationPublicSubnet2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref RouteTablePublic
+
+
+## IAM Roles
+  IamFleetRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action:
+          - sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - spotfleet.amazonaws.com
+        Version: 2012-10-17
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AmazonEC2SpotFleetRole
+      Path: /
+  IamInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    DependsOn:
+    - IamInstanceRole
+    Properties:
+      Path: /
+      Roles:
+      - Ref: IamInstanceRole
+  IamInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action:
+          - sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+        Version: 2012-10-17
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+
+Outputs:
+  Vpc:
+    Description: The ID of the VPC
+    Value: !Ref Vpc
